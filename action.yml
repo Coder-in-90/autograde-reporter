@@ -29,4 +29,6 @@ runs:
       shell: bash
       env:
         CIN90_BASE_URL: ${{ inputs.base-url }}
-      run: python '${{ github.action_path }}/scripts/report_autograde.py' results.json
+      run: |
+        echo "autograde-reporter: reporting to $CIN90_BASE_URL"
+        python '${{ github.action_path }}/scripts/report_autograde.py' results.json
