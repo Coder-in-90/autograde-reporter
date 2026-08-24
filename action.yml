@@ -1,0 +1,32 @@
+name: 'Coder in 90 autograde reporter'
+description: >-
+  Build the cin90 results payload from a pytest JSON report and POST it to the
+  Classroom ingest endpoint, authenticated with a GitHub Actions OIDC token.
+  No secrets required: `permissions: id-token: write` on the job is what lets
+  the reporter ask GitHub to mint the token.
+
+inputs:
+  base-url:
+    description: 'Base URL of the cin90 deployment to report to (no trailing slash).'
+    default: 'https://coderin90.com'
+  results:
+    description: 'Path to the pytest JSON report (pytest-json-report --json-report-file).'
+    default: 'report.json'
+  pytest-output:
+    description: 'Path to the captured pytest console output.'
+    default: 'pytest_output.txt'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build results.json
+      shell: bash
+      run: |
+        python '${{ github.action_path }}/scripts/build_results.py' \
+          '${{ inputs.results }}' '${{ inputs.pytest-output }}'
+
+    - name: Report to Coder in 90
+      shell: bash
+      env:
+        CIN90_BASE_URL: ${{ inputs.base-url }}
+      run: python '${{ github.action_path }}/scripts/report_autograde.py' results.json
