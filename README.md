@@ -57,6 +57,7 @@ secret it holds, so the grade never rests on a stored value.
 | `base-url` | `https://coderin90.com` | cin90 deployment to report to |
 | `results` | `report.json` | pytest JSON report path (`--json-report-file`) |
 | `pytest-output` | `pytest_output.txt` | captured pytest console output |
+| `pr-number` | the triggering pull request | override which PR the result attaches to; leave unset unless you mean to |
 
 ### Legacy fallback
 
@@ -72,11 +73,32 @@ never on its failure.
 and that is the design — harness fixes ship by moving it. Pin a commit SHA
 instead if you need a reproducible build.
 
+**`v1.1.0` changes the run's conclusion**, which `v1.0.0` never did: a repo that
+scores below full marks now ends red instead of green. That is the point (#395),
+but it is a behavior change arriving through a moving tag, so anything keying on
+a student repo's run conclusion — branch protection, a `needs:` gate, a badge —
+starts seeing failures it did not see before. Nothing on the cin90 server does:
+`deliver_feedback` reads the reported result, not the conclusion, and there is
+no `workflow_run` handler.
+
+Because it moves, a change here reaches every student repo ever provisioned.
+Treat the check's exit code as part of the contract: `deliver_feedback` reads
+the reported result rather than the run's conclusion, so nothing on the server
+depends on it — but a student and an instructor both read the tick.
+
 The version anchors:
 
 - `v1.0.0` — initial extraction: results builder + stdlib OIDC uploader,
   behavior-identical to the `autograde.yml` / `report_autograde.py` pair it
   was extracted from.
+- `v1.1.0` — the check now fails when the grade does (#395). Adds
+  `scripts/check_grade.py` as a final `if: always()` step, guards the first two
+  steps the same way, and derives `PR_NUMBER` from the triggering pull request
+  instead of relying on the caller to pass it.
+
+  **This is the first fix distributed by moving `v1`.** Every repo already
+  provisioned picks it up on its next run, with nothing to re-copy — which is
+  the whole reason the reporter was extracted into an action.
 
 `scripts/report_autograde.py` is kept byte-identical to the copy in the
 classroom template it was extracted from, so the two can be diffed to prove

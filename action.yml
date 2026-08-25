@@ -15,20 +15,44 @@ inputs:
   pytest-output:
     description: 'Path to the captured pytest console output.'
     default: 'pytest_output.txt'
+  pr-number:
+    description: >-
+      Pull request number to attach the result to. Defaults to the pull request
+      that triggered the run; set it only to override that.
+    default: ''
 
 runs:
   using: 'composite'
   steps:
     - name: Build results.json
+      # Both this and the report step below run unconditionally: the caller's
+      # test step swallows its own exit code, but a composite step that fails
+      # would otherwise skip everything after it, and a run that reports
+      # nothing leaves the submission looking un-submitted.
+      if: always()
       shell: bash
       run: |
         python '${{ github.action_path }}/scripts/build_results.py' \
           '${{ inputs.results }}' '${{ inputs.pytest-output }}'
 
     - name: Report to Coder in 90
+      if: always()
       shell: bash
       env:
         CIN90_BASE_URL: ${{ inputs.base-url }}
+        # Derived here rather than left to the caller: without it every result
+        # arrives with no pull request attached and feedback silently degrades
+        # from inline review comments to an issue comment.
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
       run: |
         echo "autograde-reporter: reporting to $CIN90_BASE_URL"
         python '${{ github.action_path }}/scripts/report_autograde.py' results.json
+
+    - name: Fail the check when the grade is failing
+      # Last, and always: the result is already delivered by the step above, so
+      # an honest check cannot cost anyone their grade. Without this the job's
+      # conclusion is `success` whatever the student scored, and the student
+      # reads the green tick as "my work passed" (#395).
+      if: always()
+      shell: bash
+      run: python '${{ github.action_path }}/scripts/check_grade.py' results.json
