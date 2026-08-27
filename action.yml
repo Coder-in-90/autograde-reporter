@@ -44,6 +44,13 @@ runs:
         # arrives with no pull request attached and feedback silently degrades
         # from inline review comments to an issue comment.
         PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        # Also derived here, and it cannot be done in the caller's workflow at
+        # all: on a pull_request event Actions sets GITHUB_SHA to the merge
+        # commit rather than the pushed head, and an `env:` override of a
+        # GITHUB_* variable is silently ignored. Without this the push and
+        # pull_request runs of one commit report different shas, cin90's
+        # dedupe misses, and the commit is graded and explained twice (#397).
+        CIN90_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       run: |
         echo "autograde-reporter: reporting to $CIN90_BASE_URL"
         python '${{ github.action_path }}/scripts/report_autograde.py' results.json

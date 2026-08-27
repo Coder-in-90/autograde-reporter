@@ -67,11 +67,29 @@ or `CLASSROOM_AUTOGRADE_SECRET` from the job environment, matching the
 historical template. The fallback is chosen only on the *absence* of OIDC,
 never on its failure.
 
+### Which commit gets graded
+
+`action.yml` derives the pushed head sha into `CIN90_SHA` and the reporter
+prefers it over `GITHUB_SHA`. On a `pull_request` event Actions sets
+`GITHUB_SHA` to the throwaway merge commit, so without this the push and
+pull_request runs of one commit report different shas, cin90's
+per-(submission, sha) dedupe never fires, and the commit is graded and
+explained twice (#397).
+
+This has to live in the action: a caller's workflow cannot fix it, because an
+`env:` assignment to a `GITHUB_*` variable is
+[silently ignored by the runner](https://docs.github.com/en/actions/reference/workflows-and-actions/variables).
+
 ## Versioning
 
 `v1` is a **mutable** tag: it moves to the newest release of the reporter,
 and that is the design — harness fixes ship by moving it. Pin a commit SHA
 instead if you need a reproducible build.
+
+**`v1.2.0` changes which commit a `pull_request` run reports** — the pushed
+head rather than the merge commit. A repo on this version stops double-grading
+a commit that arrives through a PR. Anything that stored the merge sha from an
+earlier release keeps it; nothing rewrites history.
 
 **`v1.1.0` changes the run's conclusion**, which `v1.0.0` never did: a repo that
 scores below full marks now ends red instead of green. That is the point (#395),
