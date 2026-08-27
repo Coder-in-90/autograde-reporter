@@ -7,6 +7,7 @@ one commit, so these cases are the contract.
 
 import os
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -30,8 +31,26 @@ CASES = [
 ]
 
 
+def check_action_yml():
+    """The script half is inert unless action.yml still derives the head.
+
+    Without this, deleting the CIN90_SHA line leaves every case above green
+    while pull_request runs go back to reporting the merge commit.
+    """
+    text = (pathlib.Path(__file__).parents[1] / "action.yml").read_text()
+    wanted = "CIN90_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
+    if wanted not in text:
+        return [f"action.yml does not set {wanted!r}"]
+    # It has to be on the step that runs the reporter, not merely present.
+    report_step = text.split("- name: Report to Coder in 90", 1)[-1]
+    report_step = re.split(r"\n    - name: ", report_step, maxsplit=1)[0]
+    if wanted not in report_step:
+        return ["action.yml sets CIN90_SHA outside the report step"]
+    return []
+
+
 def main():
-    failures = []
+    failures = check_action_yml()
     for label, environ, expected in CASES:
         saved = {k: os.environ.get(k) for k in ("CIN90_SHA", "GITHUB_SHA")}
         try:
