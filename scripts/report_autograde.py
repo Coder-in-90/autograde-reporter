@@ -49,7 +49,11 @@ Environment variables:
                               provisioning). Falls back in turn to
                               CLASSROOM_AUTOGRADE_SECRET, the older name.
   GITHUB_REPOSITORY           "owner/name" (provided automatically by Actions)
-  GITHUB_SHA                  Commit SHA being graded (provided by Actions)
+  CIN90_SHA                   Commit SHA to grade. Set by action.yml to the
+                              pushed head, which on a pull_request event is
+                              NOT what Actions puts in GITHUB_SHA (#397).
+  GITHUB_SHA                  Fallback when CIN90_SHA is unset (provided by
+                              Actions)
   PR_NUMBER                   Pull request number, or empty/unset for a push
 """
 
@@ -82,6 +86,22 @@ def _require_env(name):
         print(f"report_autograde: missing required env var {name}", file=sys.stderr)
         raise SystemExit(2)
     return value
+
+
+def graded_sha():
+    """The sha of the commit the student actually pushed.
+
+    On a ``pull_request`` event Actions sets ``GITHUB_SHA`` to the throwaway
+    merge commit, not the head. The push and pull_request runs of one commit
+    then report different shas, cin90's per-(submission, sha) dedupe never
+    fires, and the commit is graded and explained twice (#397).
+
+    ``action.yml`` derives the head into ``CIN90_SHA``, which is a name the
+    runner will actually let it set — an ``env:`` assignment to a ``GITHUB_*``
+    variable is silently ignored. ``GITHUB_SHA`` stays the fallback for a
+    workflow that calls this script without the action.
+    """
+    return os.environ.get("CIN90_SHA", "").strip() or _require_env("GITHUB_SHA")
 
 
 def _parse_pr_number(raw):
@@ -176,7 +196,7 @@ def main(argv):
 
     base_url = _require_env("CIN90_BASE_URL").rstrip("/")
     repo = _require_env("GITHUB_REPOSITORY")
-    sha = _require_env("GITHUB_SHA")
+    sha = graded_sha()
     pr_number = _parse_pr_number(os.environ.get("PR_NUMBER"))
 
     with open(argv[1], encoding="utf-8") as handle:
