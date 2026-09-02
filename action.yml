@@ -1,19 +1,34 @@
 name: 'Coder in 90 autograde reporter'
 description: >-
-  Build the cin90 results payload from a pytest JSON report and POST it to the
-  Classroom ingest endpoint, authenticated with a GitHub Actions OIDC token.
-  No secrets required: `permissions: id-token: write` on the job is what lets
-  the reporter ask GitHub to mint the token.
+  Build the cin90 results payload from a pytest JSON or JUnit XML test report
+  and POST it to the Classroom ingest endpoint, authenticated with a GitHub
+  Actions OIDC token. No secrets required: `permissions: id-token: write` on
+  the job is what lets the reporter ask GitHub to mint the token.
 
 inputs:
   base-url:
     description: 'Base URL of the cin90 deployment to report to (no trailing slash).'
     default: 'https://coderin90.com'
+  format:
+    description: >-
+      Report format to grade from: `pytest-json` (a pytest-json-report file) or
+      `junit-xml` (any runner that writes JUnit XML). Never inferred from the
+      report's contents — that is student-controlled output, and letting it
+      pick the parser lets a student pick how they are graded.
+    default: 'pytest-json'
   results:
-    description: 'Path to the pytest JSON report (pytest-json-report --json-report-file).'
+    description: >-
+      Path to the test report. With `format: pytest-json` this is the
+      pytest-json-report file. With `format: junit-xml` it may also be a
+      directory or a glob, and every matching file is aggregated into one
+      score — Surefire and Gradle both write one XML file per test class.
+      It has no per-format default, so set it whenever `format` is set.
     default: 'report.json'
   pytest-output:
-    description: 'Path to the captured pytest console output.'
+    description: >-
+      Path to the captured console output of the test run. Named for pytest
+      because it predates the other formats; it is the log of whatever runner
+      produced `results`, and it is what the run reports when no tests ran.
     default: 'pytest_output.txt'
   pr-number:
     description: >-
@@ -33,6 +48,7 @@ runs:
       shell: bash
       run: |
         python '${{ github.action_path }}/scripts/build_results.py' \
+          --format '${{ inputs.format }}' \
           '${{ inputs.results }}' '${{ inputs.pytest-output }}'
 
     - name: Report to Coder in 90

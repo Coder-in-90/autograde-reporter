@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Build the cin90 results.json payload from a pytest run.
+"""Build the cin90 results.json payload from a test run.
 
 Runs inside the student repo's workspace, after the test step. Reads:
 
-  argv[1]  the pytest JSON report   (default: report.json)
-  argv[2]  the pytest console log   (default: pytest_output.txt)
+  --format  pytest-json (default) or junit-xml
+  argv[1]   the test report      (default: report.json)
+  argv[2]   the console log      (default: pytest_output.txt)
 
 and writes ``results.json`` in the current directory:
 
@@ -23,12 +24,35 @@ a green one that reported nothing is not.
 
 The "Autograder error:" markers are load-bearing: the server keys
 needs-attention state off them, so they must not be reworded casually.
+
+The format is chosen by the caller and never sniffed from the report: the
+report is student-controlled output, and letting its contents pick the parser
+lets a student pick how they are graded.
 """
 
 import json
 import os
 import pathlib
 import sys
+
+import junit_report
+
+PYTEST_JSON = "pytest-json"
+JUNIT_XML = "junit-xml"
+FORMATS = (PYTEST_JSON, JUNIT_XML)
+
+# Shown when the console log is missing too, so the run reports the two
+# things it knows: no tests, and no output either.
+NO_OUTPUT = {
+    PYTEST_JSON: (
+        "(no pytest output was captured: the failure happened "
+        "before pytest ran; check the Actions log)"
+    ),
+    JUNIT_XML: (
+        "(no test output was captured: the failure happened "
+        "before the tests ran; check the Actions log)"
+    ),
+}
 
 # Tail size: 8 KiB read, 4,000 chars sent. The server truncates `output` at
 # 50,000 chars anyway, and the AI prompt is bounded on its side; this keeps a
@@ -76,8 +100,8 @@ def blocked_conversions():
     return kept + f"\n(truncated; {dropped} more blocked conversions not shown)"
 
 
-def pytest_tail(log_path):
-    """Last few KiB of the pytest console log, or "" if unavailable.
+def console_tail(log_path):
+    """Last few KiB of the test runner's console log, or "" if unavailable.
 
     Best-effort enrichment ONLY. Seeks to the end rather than reading the
     whole file: an import-time print loop can leave a multi-GB log, and
@@ -95,8 +119,9 @@ def pytest_tail(log_path):
         return ""
 
 
-def build_results(report_path, log_path):
-    report_missing = False
+def from_pytest_json(report_path):
+    """`(total, passed, failures, problem, notes)` from a pytest JSON report."""
+    problem = None
     try:
         report = json.loads(pathlib.Path(report_path).read_text())
     except (FileNotFoundError, json.JSONDecodeError):
@@ -105,7 +130,9 @@ def build_results(report_path, log_path):
         # harder killed the run: a segfault, an OOM kill, or pytest failing
         # to start at all.
         report = {"tests": [], "summary": {}}
-        report_missing = True
+        problem = (
+            "pytest produced no usable report (it may have crashed or been killed)."
+        )
 
     tests = report.get("tests", [])
     total = len(tests)
@@ -125,6 +152,38 @@ def build_results(report_path, log_path):
             "message": crash.get("message") or test.get("outcome", "failed"),
         })
 
+    return total, passed, failures, problem, []
+
+
+def from_junit_xml(report_path):
+    """`(total, passed, failures, problem, notes)` from JUnit XML reports.
+
+    A report we cannot read is a 0/0 error run rather than a score over the
+    files we could read: a denominator quietly short by one test class is a
+    wrong grade nobody would ever notice.
+    """
+    try:
+        total, passed, failures, notes, found = junit_report.parse(report_path)
+    except junit_report.JunitReportError as exc:
+        return 0, 0, [], f"the JUnit XML report could not be read ({exc}).", []
+
+    problem = None
+    if not found:
+        problem = f"no JUnit XML report was found at {report_path!r}."
+    return total, passed, failures, problem, notes
+
+
+def build_results(report_path, log_path, report_format=PYTEST_JSON):
+    if report_format == PYTEST_JSON:
+        total, passed, failures, problem, notes = from_pytest_json(report_path)
+    elif report_format == JUNIT_XML:
+        total, passed, failures, problem, notes = from_junit_xml(report_path)
+    else:
+        raise ValueError(
+            f"unknown report format {report_format!r}; expected one of "
+            + ", ".join(FORMATS)
+        )
+
     output = f"{passed}/{total} tests passed"
     if total == 0:
         # "0/0 tests passed" reads like a clean run. Say what actually
@@ -132,21 +191,13 @@ def build_results(report_path, log_path):
         # server keys "needs attention" off the assignment, not off this
         # text, but the "Autograder error:" marker is what tells it this
         # repo runs the CURRENT template. The server looks for it ANYWHERE
-        # in `output`, not as a prefix — the blocked-notebook note below is
-        # prepended ahead of it.
-        headline = "Autograder error: no tests were collected."
-        if report_missing:
-            headline = (
-                "Autograder error: pytest produced no usable report "
-                "(it may have crashed or been killed)."
-            )
-        tail = pytest_tail(log_path)
-        if not tail:
-            tail = (
-                "(no pytest output was captured: the failure happened "
-                "before pytest ran; check the Actions log)"
-            )
-        output = headline + "\n\n" + tail
+        # in `output`, not as a prefix — the notes below are prepended ahead
+        # of it.
+        headline = "Autograder error: " + (problem or "no tests were collected.")
+        output = headline + "\n\n" + (console_tail(log_path) or NO_OUTPUT[report_format])
+
+    if notes:
+        output = "\n".join(notes) + "\n\n" + output
 
     blocked = blocked_conversions()
     if blocked:
@@ -166,12 +217,37 @@ def write_results(payload):
     pathlib.Path("results.json").write_text(json.dumps(payload))
 
 
+def parse_args(argv):
+    """`(report_path, log_path, format)` from the script's arguments.
+
+    Hand-rolled rather than argparse because argparse exits the process on an
+    argument it dislikes, and the one thing this script promises is that
+    results.json exists when it ends — including when it was called wrongly.
+    An unknown format therefore travels on to `build_results`, which reports
+    it as an error run.
+    """
+    positional = []
+    report_format = PYTEST_JSON
+    rest = list(argv)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--format":
+            report_format = rest.pop(0) if rest else ""
+        elif arg.startswith("--format="):
+            report_format = arg.split("=", 1)[1]
+        else:
+            positional.append(arg)
+
+    report_path = positional[0] if positional else "report.json"
+    log_path = positional[1] if len(positional) > 1 else "pytest_output.txt"
+    return report_path, log_path, report_format
+
+
 def main(argv):
-    report_path = argv[1] if len(argv) > 1 else "report.json"
-    log_path = argv[2] if len(argv) > 2 else "pytest_output.txt"
+    report_path, log_path, report_format = parse_args(argv[1:])
 
     try:
-        results = build_results(report_path, log_path)
+        results = build_results(report_path, log_path, report_format)
     except Exception as exc:
         results = {
             "score": 0,
