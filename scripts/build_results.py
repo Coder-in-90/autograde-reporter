@@ -155,7 +155,7 @@ def from_pytest_json(report_path):
     return total, passed, failures, problem, []
 
 
-def from_junit_xml(report_path):
+def from_junit_xml(report_path, workspace=None):
     """`(total, passed, failures, problem, notes)` from JUnit XML reports.
 
     A report we cannot read is a 0/0 error run rather than a score over the
@@ -163,7 +163,9 @@ def from_junit_xml(report_path):
     wrong grade nobody would ever notice.
     """
     try:
-        total, passed, failures, notes, found = junit_report.parse(report_path)
+        total, passed, failures, notes, found = junit_report.parse(
+            report_path, workspace
+        )
     except junit_report.JunitReportError as exc:
         return 0, 0, [], f"the JUnit XML report could not be read ({exc}).", []
 
@@ -173,11 +175,11 @@ def from_junit_xml(report_path):
     return total, passed, failures, problem, notes
 
 
-def build_results(report_path, log_path, report_format=PYTEST_JSON):
+def build_results(report_path, log_path, report_format=PYTEST_JSON, workspace=None):
     if report_format == PYTEST_JSON:
         total, passed, failures, problem, notes = from_pytest_json(report_path)
     elif report_format == JUNIT_XML:
-        total, passed, failures, problem, notes = from_junit_xml(report_path)
+        total, passed, failures, problem, notes = from_junit_xml(report_path, workspace)
     else:
         raise ValueError(
             f"unknown report format {report_format!r}; expected one of "

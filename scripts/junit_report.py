@@ -20,6 +20,7 @@ hostile input rather than as our own output:
 """
 
 import glob
+import os
 import pathlib
 import re
 import xml.etree.ElementTree as ET
@@ -44,9 +45,104 @@ _OUTCOME_TAGS = ("failure", "error", "skipped")
 
 _GLOB_CHARS = "*?["
 
+# `(Name.ext:LINE)` — the one shape a stack frame has in Java, Kotlin, Scala,
+# JavaScript and TypeScript alike. The optional trailing group is Node's
+# column. Deliberately one pattern and no per-language handling: a runner this
+# does not fit degrades to the un-anchored failure it already produced.
+_STACK_FRAME = re.compile(r"\(([^()\s:]+\.[A-Za-z0-9_]+):(\d{1,7})(?::\d{1,7})?\)")
+
+# Only the head of a trace is scanned: the frame in the student's own code is
+# near the top, under the assertion library's frames, and the tail is the
+# runner's own reflection machinery.
+MAX_TRACE_SCAN_CHARS = 20000
+
+# Skipped wholesale when indexing the checkout. `target` and `build` are where
+# a build puts its copies of the sources, and a copy is what turns a unique
+# filename into an ambiguous one.
+SKIP_DIRS = {".git", "node_modules", "target", "build"}
+
+# The walk is enrichment inside a grading step, so it is bounded rather than
+# thorough.
+MAX_WORKSPACE_FILES = 20000
+
 
 class JunitReportError(Exception):
     """A report we will not grade from: unreadable, malformed, or hostile."""
+
+
+class _Workspace:
+    """The checkout, indexed by filename, so a stack frame can be resolved.
+
+    Built at most once per run and only when some failure actually needs it,
+    so a passing suite never walks the tree.
+    """
+
+    def __init__(self, root):
+        self._root = pathlib.Path(root)
+        self._index = None
+
+    def matches(self, filename):
+        """Every repo-relative path carrying that filename."""
+        if self._index is None:
+            self._index = self._walk()
+        return self._index.get(filename, ())
+
+    def _walk(self):
+        """filename -> paths, or nothing at all if the walk was cut short.
+
+        A partial index is worse than none: a filename that looks unique only
+        because the rest of the checkout went unread is exactly the wrong-path
+        anchor this must never produce.
+        """
+        index = {}
+        visited = 0
+        try:
+            for directory, subdirectories, filenames in os.walk(self._root):
+                subdirectories[:] = [
+                    name for name in subdirectories if name not in SKIP_DIRS
+                ]
+                for name in filenames:
+                    visited += 1
+                    if visited > MAX_WORKSPACE_FILES:
+                        return {}
+                    relative = os.path.relpath(
+                        os.path.join(directory, name), self._root
+                    )
+                    index.setdefault(name, []).append(
+                        pathlib.PurePath(relative).as_posix()
+                    )
+        except OSError:
+            return {}
+        return index
+
+
+def locate(outcome, workspace):
+    """`(path, line)` from the first stack frame naming a file in the checkout.
+
+    Surefire and most JVM and Node runners write no `file` or `line` attribute
+    at all, and cin90 keeps only failures carrying both — so without this every
+    Java failure drops out of the inline review and the class silently gets
+    summary comments instead.
+
+    Frames are read in order and one naming no file here is skipped, not given
+    up on: a JUnit assertion failure opens with the assertion library's own
+    frames, which are not in the student's repo. A filename carried by two
+    files stops the search — a review comment anchored on the wrong file is
+    worse than one that was never anchored.
+
+    Enrichment only. Any failure costs the anchor, never the payload.
+    """
+    try:
+        text = (outcome.get("message") or "") + "\n" + (outcome.text or "")
+        for frame in _STACK_FRAME.finditer(text[:MAX_TRACE_SCAN_CHARS]):
+            found = workspace.matches(pathlib.PurePosixPath(frame.group(1)).name)
+            if len(found) == 1:
+                return found[0], int(frame.group(2))
+            if found:
+                return None
+    except Exception:
+        return None
+    return None
 
 
 def report_files(results_path):
@@ -146,7 +242,7 @@ def _message(outcome):
     return text[:MAX_MESSAGE_CHARS] + "\n(truncated)"
 
 
-def parse(results_path):
+def parse(results_path, workspace=None):
     """`(total, passed, failures, notes, file_count)` over every report found.
 
     Mirrors the pytest reader: every `<testcase>` counts toward `max_score`,
@@ -157,8 +253,15 @@ def parse(results_path):
     `file_count` is what distinguishes "no reports were written" from "the
     reports contain no tests" — both score 0/0, but only the caller can say
     which happened.
+
+    `workspace` is the checkout a stack frame is resolved against; it defaults
+    to the one the action is running in.
     """
     files, notes = report_files(results_path)
+    checkout = _Workspace(
+        workspace if workspace is not None
+        else (os.environ.get("GITHUB_WORKSPACE") or ".")
+    )
     total = 0
     passed = 0
     failures = []
@@ -171,9 +274,17 @@ def parse(results_path):
                 continue
             if outcome.tag == "skipped":
                 continue
+            # A runner that supplies `file` is stating where the test is; the
+            # stack frame is only ever our reading of its prose.
+            location = case.get("file")
+            line = _line(case.get("line"))
+            if not location:
+                located = locate(outcome, checkout)
+                if located:
+                    location, line = located
             failures.append({
-                "path": case.get("file") or case.get("classname") or "",
-                "line": _line(case.get("line")),
+                "path": location or case.get("classname") or "",
+                "line": line,
                 "message": _message(outcome),
             })
     return total, passed, failures, notes, len(files)

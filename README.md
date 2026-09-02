@@ -73,6 +73,40 @@ from the testcase's `file` attribute (falling back to `classname`), `line`
 from its `line` attribute (0 when absent), and `message` from the child's
 `message` attribute, its text, or the tag name — whichever is first present.
 
+### Anchoring a failure that has no file or line
+
+Surefire, Gradle and most JVM and Node runners write **neither** a `file` nor
+a `line` attribute — a Java failure arrives as `classname` and line 0. cin90
+posts an inline review comment only for a failure carrying both, so without a
+line every Java failure would drop out of the inline review and the class
+would silently get one summary comment instead. Inline "here is the line that
+broke" is the point of the autograder.
+
+The location is in the data, in the trace: `at
+com.example.StackTest.testPop(StackTest.java:42)`. So when a testcase has no
+`file` attribute, its failure text is scanned for `(Name.ext:LINE)` — one
+regex, covering Java, Kotlin, Scala, JavaScript and TypeScript, with no
+per-language handling — and the bare filename is resolved against the
+checkout the action is running in.
+
+The rules exist to stop a **wrong** anchor, which lands a review comment on an
+unrelated line of a student's code:
+
+- the frames are read in order and one naming no file in the checkout is
+  skipped rather than given up on. A JUnit assertion failure opens with the
+  assertion library's own frames, which are not in the student's repo.
+- a filename carried by **two** files is ambiguous and stops the search. The
+  failure keeps its `classname` and line 0, exactly as it did before.
+- `.git`, `node_modules`, `target` and `build` are skipped, so a build's copy
+  of a source file cannot make the real one ambiguous, and the walk stops at
+  20,000 files. A walk that hit that cap resolves **nothing**: a filename
+  unique only because the rest of the tree went unread is the wrong anchor
+  this is trying to avoid.
+- a runner that does supply `file` is authoritative, and the trace is never
+  consulted for that testcase.
+
+All of it is enrichment: any failure here costs the anchor, never the payload.
+
 **The format is never sniffed from the report.** It is student-controlled
 output, and choosing the parser from its contents would let a student choose
 how they are graded.
@@ -93,7 +127,7 @@ Maven Surefire:
 
 ```yaml
       - run: mvn -B test > test_output.txt 2>&1 || true
-      - uses: Coder-in-90/autograde-reporter@v1.3.0
+      - uses: Coder-in-90/autograde-reporter@v1.3.1
         with:
           format: junit-xml
           results: target/surefire-reports
@@ -104,7 +138,7 @@ Gradle:
 
 ```yaml
       - run: ./gradlew test > test_output.txt 2>&1 || true
-      - uses: Coder-in-90/autograde-reporter@v1.3.0
+      - uses: Coder-in-90/autograde-reporter@v1.3.1
         with:
           format: junit-xml
           results: build/test-results/test
@@ -117,7 +151,7 @@ Jest, via [`jest-junit`](https://www.npmjs.com/package/jest-junit):
       - run: npx jest --reporters=default --reporters=jest-junit > test_output.txt 2>&1 || true
         env:
           JEST_JUNIT_OUTPUT_FILE: junit.xml
-      - uses: Coder-in-90/autograde-reporter@v1.3.0
+      - uses: Coder-in-90/autograde-reporter@v1.3.1
         with:
           format: junit-xml
           results: junit.xml
@@ -129,7 +163,7 @@ Go, via [`gotestsum`](https://github.com/gotestyourself/gotestsum):
 ```yaml
       - run: go install gotest.tools/gotestsum@latest
       - run: gotestsum --junitfile junit.xml ./... > test_output.txt 2>&1 || true
-      - uses: Coder-in-90/autograde-reporter@v1.3.0
+      - uses: Coder-in-90/autograde-reporter@v1.3.1
         with:
           format: junit-xml
           results: junit.xml
@@ -140,7 +174,7 @@ CTest:
 
 ```yaml
       - run: ctest --test-dir build --output-junit junit.xml > test_output.txt 2>&1 || true
-      - uses: Coder-in-90/autograde-reporter@v1.3.0
+      - uses: Coder-in-90/autograde-reporter@v1.3.1
         with:
           format: junit-xml
           results: junit.xml
@@ -206,6 +240,13 @@ This has to live in the action: a caller's workflow cannot fix it, because an
 and that is the design — harness fixes ship by moving it. Pin a commit SHA
 instead if you need a reproducible build.
 
+**`v1.3.1` anchors JUnit failures that carry no `file` or `line`** by
+reading the location out of the stack trace and resolving it against the
+checkout. Without it a Java class got no inline review comments at all,
+because Surefire writes neither attribute. It only ever fills in a location
+that was previously empty, and only when exactly one file in the repo
+matches, so no existing anchor changes.
+
 **`v1.3.0` adds `format: junit-xml` and changes nothing without it.** The
 input defaults to `pytest-json`, which is the behaviour every release before
 it had, so a repo that moves to this tag and sets nothing grades exactly as it
@@ -248,6 +289,8 @@ The version anchors:
   merge commit (#397).
 - `v1.3.0` — `format: junit-xml`, so a class in any language that writes a
   JUnit XML report can be graded. Default unchanged.
+- `v1.3.1` — JUnit failures with no `file`/`line` attribute are anchored
+  from their stack trace, so Java gets inline review comments.
 
 ## Self-checks
 

@@ -298,6 +298,130 @@ def check_junit_doctype_is_refused():
         expect_in("a bare entity declaration is refused", MARKER, got["output"])
 
 
+# What Surefire actually writes: no `file` and no `line` attribute, and a
+# body whose first frames belong to the assertion library rather than to the
+# student's repo.
+SUREFIRE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.StackTest" tests="1" failures="1">
+  <testcase classname="com.example.StackTest" name="testPop" time="0.01">
+    <failure message="expected: &lt;4&gt; but was: &lt;5&gt;" type="AssertionFailedError">
+org.opentest4j.AssertionFailedError: expected: &lt;4&gt; but was: &lt;5&gt;
+	at org.junit.jupiter.api.AssertionFailureBuilder.build(AssertionFailureBuilder.java:151)
+	at org.junit.jupiter.api.AssertEquals.failNotEqual(AssertEquals.java:197)
+	at com.example.StackTest.testPop(StackTest.java:42)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:568)
+    </failure>
+  </testcase>
+</testsuite>
+"""
+
+
+def check_junit_locates_a_surefire_failure():
+    """Surefire gives a classname and no line, so the anchor is in the trace.
+
+    Without this every Java failure arrives with line 0, `_located_failures`
+    on the server drops it, and inline review comments — the product's
+    headline — degrade to a summary comment for the whole language.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        write(tmp, "src/test/java/com/example/StackTest.java", "class StackTest {}")
+        report = write(tmp, "TEST-com.example.StackTest.xml", SUREFIRE_XML)
+        got = build_results(report, "", "junit-xml", workspace=tmp)
+        expect("surefire failure is anchored", got["failures"], [{
+            "path": "src/test/java/com/example/StackTest.java",
+            "line": 42,
+            "message": "expected: <4> but was: <5>",
+        }])
+
+
+def check_junit_location_skips_frames_outside_the_repo():
+    """A frame naming no file in the checkout is skipped, not given up on."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # Only the library frames resolve nowhere; nothing here matches at all.
+        report = write(tmp, "r.xml", SUREFIRE_XML)
+        got = build_results(report, "", "junit-xml", workspace=tmp)
+        expect("no match leaves it unset", got["failures"], [{
+            "path": "com.example.StackTest",
+            "line": 0,
+            "message": "expected: <4> but was: <5>",
+        }])
+
+
+def check_junit_ambiguous_filename_is_left_unset():
+    """Two files of that name is a coin flip, and a wrong anchor is worse."""
+    with tempfile.TemporaryDirectory() as tmp:
+        write(tmp, "core/src/StackTest.java", "class StackTest {}")
+        write(tmp, "web/src/StackTest.java", "class StackTest {}")
+        report = write(tmp, "r.xml", SUREFIRE_XML)
+        got = build_results(report, "", "junit-xml", workspace=tmp)
+        expect("ambiguous path", got["failures"][0]["path"], "com.example.StackTest")
+        expect("ambiguous line", got["failures"][0]["line"], 0)
+
+
+def check_junit_location_ignores_skipped_directories():
+    """A build output copy must not make the source ambiguous."""
+    with tempfile.TemporaryDirectory() as tmp:
+        write(tmp, "src/test/java/com/example/StackTest.java", "class StackTest {}")
+        write(tmp, "target/generated-test-sources/StackTest.java", "copy")
+        write(tmp, "node_modules/pkg/StackTest.java", "copy")
+        report = write(tmp, "r.xml", SUREFIRE_XML)
+        got = build_results(report, "", "junit-xml", workspace=tmp)
+        expect(
+            "build output does not shadow the source",
+            got["failures"][0]["path"],
+            "src/test/java/com/example/StackTest.java",
+        )
+
+
+def check_junit_location_reads_a_node_frame():
+    """One regex, not one per language: jest frames carry a column too."""
+    trace = "Error: nope\n    at Object.&lt;anonymous&gt; (/home/runner/work/r/r/src/cart.js:17:5)"
+    with tempfile.TemporaryDirectory() as tmp:
+        write(tmp, "src/cart.js", "module.exports = {}")
+        report = write(tmp, "junit.xml", f"""<testsuite>
+  <testcase classname="cart" name="totals"><failure>{trace}</failure></testcase>
+</testsuite>""")
+        got = build_results(report, "", "junit-xml", workspace=tmp)
+        expect("node frame is anchored", (
+            got["failures"][0]["path"], got["failures"][0]["line"],
+        ), ("src/cart.js", 17))
+
+
+def check_junit_file_attribute_wins():
+    """A runner that supplies `file` is authoritative; the trace is a guess."""
+    with tempfile.TemporaryDirectory() as tmp:
+        write(tmp, "src/test/java/com/example/StackTest.java", "class StackTest {}")
+        report = write(tmp, "r.xml", SUREFIRE_XML.replace(
+            '<testcase classname="com.example.StackTest" name="testPop" time="0.01">',
+            '<testcase classname="com.example.StackTest" name="testPop"'
+            ' file="given/Other.java" line="7">',
+        ))
+        got = build_results(report, "", "junit-xml", workspace=tmp)
+        expect("the file attribute wins", (
+            got["failures"][0]["path"], got["failures"][0]["line"],
+        ), ("given/Other.java", 7))
+
+
+def check_junit_location_cap():
+    """A walk that hit its cap resolves nothing rather than half the tree.
+
+    A basename unique only because the rest of the checkout went unread is
+    exactly the wrong-path anchor this must never produce.
+    """
+    import junit_report
+
+    with tempfile.TemporaryDirectory() as tmp:
+        write(tmp, "src/test/java/com/example/StackTest.java", "class StackTest {}")
+        report = write(tmp, "r.xml", SUREFIRE_XML)
+        saved = junit_report.MAX_WORKSPACE_FILES
+        try:
+            junit_report.MAX_WORKSPACE_FILES = 1
+            got = build_results(report, "", "junit-xml", workspace=tmp)
+        finally:
+            junit_report.MAX_WORKSPACE_FILES = saved
+        expect("a truncated walk anchors nothing", got["failures"][0]["line"], 0)
+
+
 def check_junit_caps():
     from junit_report import MAX_BYTES_PER_FILE, MAX_FILES, MAX_MESSAGE_CHARS
 
@@ -406,6 +530,13 @@ def main():
         check_junit_zero_testcases,
         check_junit_malformed,
         check_junit_doctype_is_refused,
+        check_junit_locates_a_surefire_failure,
+        check_junit_location_skips_frames_outside_the_repo,
+        check_junit_ambiguous_filename_is_left_unset,
+        check_junit_location_ignores_skipped_directories,
+        check_junit_location_reads_a_node_frame,
+        check_junit_file_attribute_wins,
+        check_junit_location_cap,
         check_junit_caps,
         check_unknown_format_is_refused,
         check_results_json_is_always_written,
