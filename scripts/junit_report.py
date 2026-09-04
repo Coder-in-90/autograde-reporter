@@ -254,14 +254,11 @@ def parse(results_path, workspace=None):
     reports contain no tests" — both score 0/0, but only the caller can say
     which happened.
 
-    `workspace` is the checkout a stack frame is resolved against; it defaults
-    to the one the action is running in.
+    `workspace` is the checkout a stack frame is resolved against, already
+    resolved by `build_results`.
     """
     files, notes = report_files(results_path)
-    checkout = _Workspace(
-        workspace if workspace is not None
-        else (os.environ.get("GITHUB_WORKSPACE") or ".")
-    )
+    checkout = _Workspace(workspace)
     total = 0
     passed = 0
     failures = []

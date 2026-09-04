@@ -73,6 +73,39 @@ from the testcase's `file` attribute (falling back to `classname`), `line`
 from its `line` attribute (0 when absent), and `message` from the child's
 `message` attribute, its text, or the tag name — whichever is first present.
 
+### Failure paths
+
+GitHub's reviews API anchors a comment by a path relative to the repository
+root. The two readers reach that differently, and only one of them enforces
+it.
+
+**pytest** is resolved here. pytest-json-report writes `crash.path` as the
+runner's absolute path (`/home/runner/work/<repo>/<repo>/tests/test_x.py`),
+which the API refuses, so it is taken relative to `GITHUB_WORKSPACE`. A crash
+resolving outside the checkout is a library frame: the failing test's own
+nodeid path stands in and the line is dropped, because that line numbers a
+different file.
+
+**JUnit** takes the runner's `file` attribute as given, and falls back to
+`classname`, which is not a path at all (`com.example.AppTest`). What makes
+that work today is that none of the five recipes emits an absolute `file`:
+four write no `file` and fall back to `locate()`, which does resolve against
+the checkout, and jest-junit's `addFileAttribute` is off. A runner that
+started writing one would break the anchor silently.
+
+The nodeid fallback is weaker than a resolved path either way: pytest builds
+a nodeid against its own rootdir, which is the repository root only while the
+test command runs pytest from there. Resolution also assumes the checkout is
+`GITHUB_WORKSPACE` itself, so `actions/checkout` with a `path:` needs that
+path passed as the workspace.
+
+A failure that cannot be anchored is **named in the output** rather than
+quietly losing its line. cin90 keeps only failures carrying both a path and a
+line, so a dropped anchor takes the failure out of the inline review
+altogether, and it never reaches the API — which means the "inline review
+failed" warning does not fire either, and the run reads exactly like one
+where nothing failed.
+
 ### Anchoring a failure that has no file or line
 
 Surefire, Gradle and most JVM and Node runners write **neither** a `file` nor
@@ -239,6 +272,12 @@ This has to live in the action: a caller's workflow cannot fix it, because an
 `v1` is a **mutable** tag: it moves to the newest release of the reporter,
 and that is the design — harness fixes ship by moving it. Pin a commit SHA
 instead if you need a reproducible build.
+
+**Unreleased: pytest failure paths are resolved against the checkout.** A
+failure whose crash carried the runner's absolute path got no inline comment
+from cin90 - the reviews call 422'd and degraded to a summary. A failure
+carrying no crash already reported the relative nodeid path and is
+unaffected.
 
 **`v1.3.1` anchors JUnit failures that carry no `file` or `line`** by
 reading the location out of the stack trace and resolving it against the

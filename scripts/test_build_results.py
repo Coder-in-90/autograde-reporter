@@ -14,6 +14,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
@@ -143,6 +144,223 @@ def check_pytest_json_is_unchanged():
             build_results(report, log, "pytest-json"),
             build_results(report, log),
         )
+
+
+def check_pytest_crash_path_is_repo_relative():
+    """pytest-json-report writes `crash.path` as the runner's absolute path.
+
+    GitHub's reviews API takes repo-relative paths only, so a Python failure
+    carrying one got no inline comment: the review 422'd and silently
+    degraded to a summary.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed in 0.1s")
+
+        absolute = str(pathlib.Path(tmp) / "tests" / "test_a.py")
+        report = write(tmp, "abs.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": absolute, "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("absolute crash path is relativised", got["failures"], [
+            {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
+        report = write(tmp, "rel.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": "tests/test_a.py", "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a relative crash path passes through", got["failures"], [
+            {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
+        outside = str(pathlib.Path(tmp).parent / "site-packages" / "numpy" / "core.py")
+        report = write(tmp, "outside.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": outside, "lineno": 913, "message": "TypeError",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a crash outside the checkout keeps no line", got["failures"], [
+            {"path": "tests/test_a.py", "line": 0, "message": "TypeError"},
+        ])
+
+        report = write(tmp, "escape.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": "../shared/test_x.py", "lineno": 7, "message": "boom",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a relative path escaping the checkout keeps no line",
+               got["failures"],
+               [{"path": "tests/test_a.py", "line": 0, "message": "boom"}])
+
+        # `..data` is inside the checkout; `relpath` returns it verbatim, so
+        # a prefix test on ".." reads it as a library frame and drops the line.
+        dotted = str(pathlib.Path(tmp) / "..data" / "test_a.py")
+        report = write(tmp, "dotted.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": dotted, "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a directory starting with .. is still inside", got["failures"], [
+            {"path": "..data/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
+        report = write(tmp, "nocrash.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a failure with no crash keeps the nodeid path", got["failures"], [
+            {"path": "tests/test_a.py", "line": 0, "message": "failed"},
+        ])
+
+
+def check_pytest_says_when_a_failure_could_not_be_anchored():
+    """A dropped anchor must leave a trace somewhere a person reads.
+
+    cin90 keeps only failures carrying both a path and a line, and `line: 0`
+    is falsy — so an unanchorable failure is not posted without a line, it is
+    removed from the review, and the "inline review failed" warning that was
+    the feature's only failing surface never fires either. Silence then reads
+    exactly like a run where every test passed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed in 0.1s")
+        outside = str(pathlib.Path(tmp).parent / "site-packages" / "json" / "decoder.py")
+        report = write(tmp, "lib.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": outside, "lineno": 355, "message": "JSONDecodeError",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("the unanchored count is reported",
+               "1 failure could not be anchored" in got["output"], True)
+
+        # A collection error never had a line to lose, so noting one would be
+        # a false alarm at the top of the student's output.
+        report = write(tmp, "noline.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a failure that never had a line is not called unanchored",
+               "could not be anchored" in got["output"], False)
+
+
+def check_a_non_string_crash_path_does_not_lose_the_grade():
+    """The report is student-controlled: `os.path.isabs(123)` raises, which
+    `main` turns into a 0/0 `Autograder error:` run, and cin90 records no
+    grade at all for a run that really scored 1/2."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed, 1 passed in 0.1s")
+        report = write(tmp, "hostile.json", json.dumps({"tests": [
+            {"nodeid": "tests/test_a.py::test_one", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+             "call": {"crash": {"path": 123, "lineno": 7, "message": "boom"}}},
+        ]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a hostile path still scores", (got["score"], got["max_score"]),
+               (1, 2))
+        expect("a hostile path falls back to the nodeid",
+               got["failures"][0]["path"], "tests/test_a.py")
+
+        report = write(tmp, "hostile_line.json", json.dumps({"tests": [
+            {"nodeid": "tests/test_a.py::test_one", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+             "call": {"crash": {
+                 "path": "tests/test_a.py", "lineno": "seven", "message": "boom",
+             }}},
+        ]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a hostile lineno still scores", (got["score"], got["max_score"]),
+               (1, 2))
+        expect("a hostile lineno anchors nothing",
+               got["failures"][0]["line"], 0)
+
+
+def check_pytest_survives_a_symlinked_checkout():
+    """Both `realpath` calls, on a symlink this test builds itself.
+
+    On macOS `tempfile` already hands out a symlinked path, so the temp dir
+    alone pins these by accident — and the runner that gates this is Linux,
+    where it does not. A self-hosted checkout reached through a symlink
+    otherwise resolves outside the workspace and every Python failure
+    silently degrades to `line: 0`, which cin90 drops from the review.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        real = pathlib.Path(tmp) / "real"
+        (real / "tests").mkdir(parents=True)
+        link = pathlib.Path(tmp) / "link"
+        link.symlink_to(real)
+        log = write(str(real), "out.txt", "1 failed in 0.1s")
+        report = write(str(real), "sym.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": str(link / "tests" / "test_a.py"),
+                "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=str(real))
+        expect("a symlinked checkout still anchors", got["failures"], [
+            {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
+
+def check_pytest_workspace_falls_back_without_the_environment():
+    """`GITHUB_WORKSPACE` unset AND an absolute crash path - the one case the
+    `or "."` fallback exists for. Without it `realpath(None)` raises and the
+    run is recorded as a 0/0 error rather than the score it earned."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed, 1 passed in 0.1s")
+        report = write(tmp, "noenv.json", json.dumps({"tests": [
+            {"nodeid": "tests/test_a.py::test_one", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+             "call": {"crash": {
+                 "path": str(pathlib.Path(tmp) / "tests" / "test_a.py"),
+                 "lineno": 7, "message": "assert 1 == 2",
+             }}},
+        ]}))
+        with mock.patch.dict(os.environ, clear=False) as env:
+            env.pop("GITHUB_WORKSPACE", None)
+            got = build_results(report, log)
+        expect("no GITHUB_WORKSPACE still scores",
+               (got["score"], got["max_score"]), (1, 2))
+
+
+def check_pytest_workspace_defaults_to_the_checkout():
+    """The action passes no workspace, so GITHUB_WORKSPACE is the live path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed in 0.1s")
+        absolute = str(pathlib.Path(tmp) / "tests" / "test_a.py")
+        report = write(tmp, "env.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": absolute, "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        with mock.patch.dict(os.environ, {"GITHUB_WORKSPACE": tmp}):
+            got = build_results(report, log)
+        expect("GITHUB_WORKSPACE is the default checkout", got["failures"], [
+            {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
 
 
 def check_junit_passing():
@@ -522,6 +740,12 @@ def check_action_yml_passes_the_format_through():
 def main():
     for check in (
         check_pytest_json_is_unchanged,
+        check_pytest_crash_path_is_repo_relative,
+        check_pytest_says_when_a_failure_could_not_be_anchored,
+        check_a_non_string_crash_path_does_not_lose_the_grade,
+        check_pytest_survives_a_symlinked_checkout,
+        check_pytest_workspace_falls_back_without_the_environment,
+        check_pytest_workspace_defaults_to_the_checkout,
         check_junit_passing,
         check_junit_failing,
         check_junit_message_falls_back_to_the_tag,
