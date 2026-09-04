@@ -14,6 +14,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
@@ -148,9 +149,9 @@ def check_pytest_json_is_unchanged():
 def check_pytest_crash_path_is_repo_relative():
     """pytest-json-report writes `crash.path` as the runner's absolute path.
 
-    GitHub's reviews API takes repo-relative paths only, so the server's
-    inline review 422s on every Python assignment and silently degrades to a
-    summary comment — the whole language, since the feature shipped.
+    GitHub's reviews API takes repo-relative paths only, so a Python failure
+    carrying one got no inline comment: the review 422'd and silently
+    degraded to a summary.
     """
     with tempfile.TemporaryDirectory() as tmp:
         log = write(tmp, "out.txt", "1 failed in 0.1s")
@@ -193,6 +194,33 @@ def check_pytest_crash_path_is_repo_relative():
             {"path": "tests/test_a.py", "line": 0, "message": "TypeError"},
         ])
 
+        report = write(tmp, "escape.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": "../shared/test_x.py", "lineno": 7, "message": "boom",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a relative path escaping the checkout keeps no line",
+               got["failures"],
+               [{"path": "tests/test_a.py", "line": 0, "message": "boom"}])
+
+        # `..data` is inside the checkout; `relpath` returns it verbatim, so
+        # a prefix test on ".." reads it as a library frame and drops the line.
+        dotted = str(pathlib.Path(tmp) / "..data" / "test_a.py")
+        report = write(tmp, "dotted.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": dotted, "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a directory starting with .. is still inside", got["failures"], [
+            {"path": "..data/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
         report = write(tmp, "nocrash.json", json.dumps({"tests": [{
             "nodeid": "tests/test_a.py::test_two", "outcome": "failed",
         }]}))
@@ -214,15 +242,8 @@ def check_pytest_workspace_defaults_to_the_checkout():
                 "path": absolute, "lineno": 7, "message": "assert 1 == 2",
             }},
         }]}))
-        previous = os.environ.get("GITHUB_WORKSPACE")
-        os.environ["GITHUB_WORKSPACE"] = tmp
-        try:
+        with mock.patch.dict(os.environ, {"GITHUB_WORKSPACE": tmp}):
             got = build_results(report, log)
-        finally:
-            if previous is None:
-                os.environ.pop("GITHUB_WORKSPACE", None)
-            else:
-                os.environ["GITHUB_WORKSPACE"] = previous
         expect("GITHUB_WORKSPACE is the default checkout", got["failures"], [
             {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
         ])

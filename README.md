@@ -73,16 +73,29 @@ from the testcase's `file` attribute (falling back to `classname`), `line`
 from its `line` attribute (0 when absent), and `message` from the child's
 `message` attribute, its text, or the tag name — whichever is first present.
 
-### Failure paths are repo-relative
+### Failure paths
 
 GitHub's reviews API anchors a comment by a path relative to the repository
-root, so that is what `failures[].path` carries in both formats. The pytest
-path needs work to get there: pytest-json-report writes `crash.path` as the
+root. The two readers reach that differently, and only one of them enforces
+it.
+
+**pytest** is resolved here. pytest-json-report writes `crash.path` as the
 runner's absolute path (`/home/runner/work/<repo>/<repo>/tests/test_x.py`),
-which the API refuses, so it is resolved against `GITHUB_WORKSPACE`. A crash
-whose file is outside the checkout is a library frame: the failing test's own
-file stands in and the line is dropped, because that line numbers a different
-file.
+which the API refuses, so it is taken relative to `GITHUB_WORKSPACE`. A crash
+resolving outside the checkout is a library frame: the failing test's own
+nodeid path stands in and the line is dropped, because that line numbers a
+different file.
+
+**JUnit** takes the runner's `file` attribute as given, and falls back to
+`classname`, which is not a path at all (`com.example.AppTest`). What makes
+that work today is that none of the five recipes emits an absolute `file`:
+four write no `file` and fall back to `locate()`, which does resolve against
+the checkout, and jest-junit's `addFileAttribute` is off. A runner that
+started writing one would break the anchor silently.
+
+The nodeid fallback is weaker than a resolved path either way: pytest builds
+a nodeid against its own rootdir, which is the repository root only while the
+test command runs pytest from there.
 
 ### Anchoring a failure that has no file or line
 
@@ -251,10 +264,11 @@ This has to live in the action: a caller's workflow cannot fix it, because an
 and that is the design — harness fixes ship by moving it. Pin a commit SHA
 instead if you need a reproducible build.
 
-**Unreleased: pytest failure paths are repo-relative.** They were the runner's
-absolute path, so cin90's inline review 422'd on every Python assignment and
-degraded to a summary comment - the feature has never worked for Python. A
-report whose paths were already relative is unaffected.
+**Unreleased: pytest failure paths are resolved against the checkout.** A
+failure whose crash carried the runner's absolute path got no inline comment
+from cin90 - the reviews call 422'd and degraded to a summary. A failure
+carrying no crash already reported the relative nodeid path and is
+unaffected.
 
 **`v1.3.1` anchors JUnit failures that carry no `file` or `line`** by
 reading the location out of the stack trace and resolving it against the

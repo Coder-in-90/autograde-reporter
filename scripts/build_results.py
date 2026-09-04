@@ -119,40 +119,51 @@ def console_tail(log_path):
         return ""
 
 
-def _pytest_location(crash, nodeid_path, workspace):
-    """`(path, line)` for one pytest failure, repo-relative.
+def _outside(relative):
+    """Does this `relpath` result leave the directory it was taken against?
 
-    pytest-json-report writes `crash.path` as the runner's absolute path, which
-    GitHub's reviews API refuses, so it is resolved against the checkout. A
-    crash outside the checkout is a library frame: the test's own file stands
-    in and the line is dropped, because that line numbers a different file and
-    a review comment on the wrong line is worse than one that was never
-    anchored.
+    A path segment may itself begin with `..`, so a prefix test alone reads
+    `..data/test_a.py` — which is inside — as a library frame and throws its
+    line away.
+    """
+    return relative == os.pardir or relative.startswith(os.pardir + os.sep)
+
+
+def _pytest_location(crash, nodeid_path, workspace):
+    """`(path, line)` for one pytest failure, resolved against the checkout.
+
+    pytest-json-report normally writes `crash.path` as the runner's absolute
+    path, which GitHub's reviews API refuses. A crash resolving outside the
+    checkout is a library frame: the nodeid's path stands in and the line is
+    dropped, because that line numbers a different file and a review comment
+    on the wrong line is worse than one that was never anchored.
+
+    The nodeid fallback is the weaker answer: pytest builds it against its own
+    rootdir, which is the repository root only while the starter runs pytest
+    from there.
     """
     path = crash.get("path") or ""
     line = int(crash.get("lineno") or 0)
     if not path:
         return nodeid_path, line
-    if not os.path.isabs(path):
-        return pathlib.PurePath(path).as_posix(), line
-    relative = os.path.relpath(
-        os.path.realpath(path), os.path.realpath(workspace)
-    )
-    if relative.startswith(os.pardir):
+    if os.path.isabs(path):
+        path = os.path.relpath(
+            os.path.realpath(path), os.path.realpath(workspace)
+        )
+    # Both branches: a relative path can escape the checkout too, and the
+    # reviews API refuses `../shared/test_x.py` exactly as it refuses an
+    # absolute one.
+    if _outside(path):
         return nodeid_path, 0
-    return pathlib.PurePath(relative).as_posix(), line
+    return pathlib.PurePath(path).as_posix(), line
 
 
 def from_pytest_json(report_path, workspace=None):
     """`(total, passed, failures, problem, notes)` from a pytest JSON report.
 
-    `workspace` is the checkout an absolute crash path is resolved against; it
-    defaults to the one the action is running in.
+    `workspace` is the checkout an absolute crash path is resolved against.
     """
-    checkout = (
-        workspace if workspace is not None
-        else (os.environ.get("GITHUB_WORKSPACE") or ".")
-    )
+    checkout = workspace or "."
     problem = None
     try:
         report = json.loads(pathlib.Path(report_path).read_text())
@@ -209,6 +220,9 @@ def from_junit_xml(report_path, workspace=None):
 
 
 def build_results(report_path, log_path, report_format=PYTEST_JSON, workspace=None):
+    # Resolved here rather than in each reader: this is the only caller of
+    # either, and two copies of the fallback drift.
+    workspace = workspace or os.environ.get("GITHUB_WORKSPACE") or "."
     if report_format == PYTEST_JSON:
         total, passed, failures, problem, notes = from_pytest_json(
             report_path, workspace
