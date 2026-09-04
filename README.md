@@ -73,6 +73,17 @@ from the testcase's `file` attribute (falling back to `classname`), `line`
 from its `line` attribute (0 when absent), and `message` from the child's
 `message` attribute, its text, or the tag name — whichever is first present.
 
+### Failure paths are repo-relative
+
+GitHub's reviews API anchors a comment by a path relative to the repository
+root, so that is what `failures[].path` carries in both formats. The pytest
+path needs work to get there: pytest-json-report writes `crash.path` as the
+runner's absolute path (`/home/runner/work/<repo>/<repo>/tests/test_x.py`),
+which the API refuses, so it is resolved against `GITHUB_WORKSPACE`. A crash
+whose file is outside the checkout is a library frame: the failing test's own
+file stands in and the line is dropped, because that line numbers a different
+file.
+
 ### Anchoring a failure that has no file or line
 
 Surefire, Gradle and most JVM and Node runners write **neither** a `file` nor
@@ -239,6 +250,11 @@ This has to live in the action: a caller's workflow cannot fix it, because an
 `v1` is a **mutable** tag: it moves to the newest release of the reporter,
 and that is the design — harness fixes ship by moving it. Pin a commit SHA
 instead if you need a reproducible build.
+
+**Unreleased: pytest failure paths are repo-relative.** They were the runner's
+absolute path, so cin90's inline review 422'd on every Python assignment and
+degraded to a summary comment - the feature has never worked for Python. A
+report whose paths were already relative is unaffected.
 
 **`v1.3.1` anchors JUnit failures that carry no `file` or `line`** by
 reading the location out of the stack trace and resolving it against the

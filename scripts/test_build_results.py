@@ -145,6 +145,89 @@ def check_pytest_json_is_unchanged():
         )
 
 
+def check_pytest_crash_path_is_repo_relative():
+    """pytest-json-report writes `crash.path` as the runner's absolute path.
+
+    GitHub's reviews API takes repo-relative paths only, so the server's
+    inline review 422s on every Python assignment and silently degrades to a
+    summary comment — the whole language, since the feature shipped.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed in 0.1s")
+
+        absolute = str(pathlib.Path(tmp) / "tests" / "test_a.py")
+        report = write(tmp, "abs.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": absolute, "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("absolute crash path is relativised", got["failures"], [
+            {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
+        report = write(tmp, "rel.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": "tests/test_a.py", "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a relative crash path passes through", got["failures"], [
+            {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
+        outside = str(pathlib.Path(tmp).parent / "site-packages" / "numpy" / "core.py")
+        report = write(tmp, "outside.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": outside, "lineno": 913, "message": "TypeError",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a crash outside the checkout keeps no line", got["failures"], [
+            {"path": "tests/test_a.py", "line": 0, "message": "TypeError"},
+        ])
+
+        report = write(tmp, "nocrash.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a failure with no crash keeps the nodeid path", got["failures"], [
+            {"path": "tests/test_a.py", "line": 0, "message": "failed"},
+        ])
+
+
+def check_pytest_workspace_defaults_to_the_checkout():
+    """The action passes no workspace, so GITHUB_WORKSPACE is the live path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed in 0.1s")
+        absolute = str(pathlib.Path(tmp) / "tests" / "test_a.py")
+        report = write(tmp, "env.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": absolute, "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        previous = os.environ.get("GITHUB_WORKSPACE")
+        os.environ["GITHUB_WORKSPACE"] = tmp
+        try:
+            got = build_results(report, log)
+        finally:
+            if previous is None:
+                os.environ.pop("GITHUB_WORKSPACE", None)
+            else:
+                os.environ["GITHUB_WORKSPACE"] = previous
+        expect("GITHUB_WORKSPACE is the default checkout", got["failures"], [
+            {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
+
 def check_junit_passing():
     with tempfile.TemporaryDirectory() as tmp:
         report = write(tmp, "TEST-AppTest.xml", PASSING_XML)
@@ -522,6 +605,8 @@ def check_action_yml_passes_the_format_through():
 def main():
     for check in (
         check_pytest_json_is_unchanged,
+        check_pytest_crash_path_is_repo_relative,
+        check_pytest_workspace_defaults_to_the_checkout,
         check_junit_passing,
         check_junit_failing,
         check_junit_message_falls_back_to_the_tag,
