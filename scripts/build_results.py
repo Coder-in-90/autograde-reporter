@@ -170,9 +170,9 @@ def _pytest_location(crash, nodeid_path, workspace):
 def from_pytest_json(report_path, workspace=None):
     """`(total, passed, failures, problem, notes)` from a pytest JSON report.
 
-    `workspace` is the checkout an absolute crash path is resolved against.
+    `workspace` is the checkout an absolute crash path is resolved against,
+    already resolved by `build_results`.
     """
-    checkout = workspace or "."
     problem = None
     try:
         report = json.loads(pathlib.Path(report_path).read_text())
@@ -199,7 +199,7 @@ def from_pytest_json(report_path, workspace=None):
         crash = call.get("crash") or {}
         # nodeid looks like "tests/test_x.py::test_name"
         nodeid_path = test.get("nodeid", "").split("::", 1)[0]
-        path, line = _pytest_location(crash, nodeid_path, checkout)
+        path, line = _pytest_location(crash, nodeid_path, workspace)
         if crash.get("lineno") and not line:
             unanchored += 1
         failures.append({

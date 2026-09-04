@@ -254,10 +254,11 @@ def parse(results_path, workspace=None):
     reports contain no tests" — both score 0/0, but only the caller can say
     which happened.
 
-    `workspace` is the checkout a stack frame is resolved against.
+    `workspace` is the checkout a stack frame is resolved against, already
+    resolved by `build_results`.
     """
     files, notes = report_files(results_path)
-    checkout = _Workspace(workspace or ".")
+    checkout = _Workspace(workspace)
     total = 0
     passed = 0
     failures = []

@@ -253,6 +253,15 @@ def check_pytest_says_when_a_failure_could_not_be_anchored():
         expect("the unanchored count is reported",
                "1 failure could not be anchored" in got["output"], True)
 
+        # A collection error never had a line to lose, so noting one would be
+        # a false alarm at the top of the student's output.
+        report = write(tmp, "noline.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a failure that never had a line is not called unanchored",
+               "could not be anchored" in got["output"], False)
+
 
 def check_a_non_string_crash_path_does_not_lose_the_grade():
     """The report is student-controlled: `os.path.isabs(123)` raises, which
@@ -270,6 +279,69 @@ def check_a_non_string_crash_path_does_not_lose_the_grade():
                (1, 2))
         expect("a hostile path falls back to the nodeid",
                got["failures"][0]["path"], "tests/test_a.py")
+
+        report = write(tmp, "hostile_line.json", json.dumps({"tests": [
+            {"nodeid": "tests/test_a.py::test_one", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+             "call": {"crash": {
+                 "path": "tests/test_a.py", "lineno": "seven", "message": "boom",
+             }}},
+        ]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a hostile lineno still scores", (got["score"], got["max_score"]),
+               (1, 2))
+        expect("a hostile lineno anchors nothing",
+               got["failures"][0]["line"], 0)
+
+
+def check_pytest_survives_a_symlinked_checkout():
+    """Both `realpath` calls, on a symlink this test builds itself.
+
+    On macOS `tempfile` already hands out a symlinked path, so the temp dir
+    alone pins these by accident — and the runner that gates this is Linux,
+    where it does not. A self-hosted checkout reached through a symlink
+    otherwise resolves outside the workspace and every Python failure
+    silently degrades to `line: 0`, which cin90 drops from the review.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        real = pathlib.Path(tmp) / "real"
+        (real / "tests").mkdir(parents=True)
+        link = pathlib.Path(tmp) / "link"
+        link.symlink_to(real)
+        log = write(str(real), "out.txt", "1 failed in 0.1s")
+        report = write(str(real), "sym.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": str(link / "tests" / "test_a.py"),
+                "lineno": 7, "message": "assert 1 == 2",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=str(real))
+        expect("a symlinked checkout still anchors", got["failures"], [
+            {"path": "tests/test_a.py", "line": 7, "message": "assert 1 == 2"},
+        ])
+
+
+def check_pytest_workspace_falls_back_without_the_environment():
+    """`GITHUB_WORKSPACE` unset AND an absolute crash path - the one case the
+    `or "."` fallback exists for. Without it `realpath(None)` raises and the
+    run is recorded as a 0/0 error rather than the score it earned."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed, 1 passed in 0.1s")
+        report = write(tmp, "noenv.json", json.dumps({"tests": [
+            {"nodeid": "tests/test_a.py::test_one", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+             "call": {"crash": {
+                 "path": str(pathlib.Path(tmp) / "tests" / "test_a.py"),
+                 "lineno": 7, "message": "assert 1 == 2",
+             }}},
+        ]}))
+        with mock.patch.dict(os.environ, clear=False) as env:
+            env.pop("GITHUB_WORKSPACE", None)
+            got = build_results(report, log)
+        expect("no GITHUB_WORKSPACE still scores",
+               (got["score"], got["max_score"]), (1, 2))
 
 
 def check_pytest_workspace_defaults_to_the_checkout():
@@ -671,6 +743,8 @@ def main():
         check_pytest_crash_path_is_repo_relative,
         check_pytest_says_when_a_failure_could_not_be_anchored,
         check_a_non_string_crash_path_does_not_lose_the_grade,
+        check_pytest_survives_a_symlinked_checkout,
+        check_pytest_workspace_falls_back_without_the_environment,
         check_pytest_workspace_defaults_to_the_checkout,
         check_junit_passing,
         check_junit_failing,
