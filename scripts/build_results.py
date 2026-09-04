@@ -143,9 +143,18 @@ def _pytest_location(crash, nodeid_path, workspace):
     from there.
     """
     path = crash.get("path") or ""
-    line = int(crash.get("lineno") or 0)
+    try:
+        line = int(crash.get("lineno") or 0)
+    except (TypeError, ValueError):
+        line = 0
     if not path:
         return nodeid_path, line
+    # The report is student-controlled. A non-string raised out of
+    # `os.path.isabs` and turned a real 1/2 into a 0/0 "Autograder error:"
+    # run, which cin90 records as no grade at all. Coercing it would anchor on
+    # whatever it stringifies to, so it goes to the fallback instead.
+    if not isinstance(path, str):
+        return nodeid_path, 0
     if os.path.isabs(path):
         path = os.path.relpath(
             os.path.realpath(path), os.path.realpath(workspace)
@@ -182,6 +191,7 @@ def from_pytest_json(report_path, workspace=None):
     passed = sum(1 for t in tests if t.get("outcome") == "passed")
 
     failures = []
+    unanchored = 0
     for test in tests:
         if test.get("outcome") == "passed":
             continue
@@ -190,13 +200,29 @@ def from_pytest_json(report_path, workspace=None):
         # nodeid looks like "tests/test_x.py::test_name"
         nodeid_path = test.get("nodeid", "").split("::", 1)[0]
         path, line = _pytest_location(crash, nodeid_path, checkout)
+        if crash.get("lineno") and not line:
+            unanchored += 1
         failures.append({
             "path": path,
             "line": line,
             "message": crash.get("message") or test.get("outcome", "failed"),
         })
 
-    return total, passed, failures, problem, []
+    notes = []
+    if unanchored:
+        # Not an "Autograder error:" line: the run has a real score. cin90
+        # keeps only failures carrying both a path and a line, so a dropped
+        # anchor removes the failure from the inline review outright - and it
+        # never reaches the API, so the "inline review failed" warning that is
+        # the feature's only failing surface does not fire either. Without
+        # this the run is indistinguishable from one where nothing failed.
+        notes.append(
+            f"Note: {unanchored} failure{'' if unanchored == 1 else 's'} "
+            "could not be anchored to a file in this repository, so no inline "
+            "review comment was written for "
+            f"{'it' if unanchored == 1 else 'them'}. The failure text is below."
+        )
+    return total, passed, failures, problem, notes
 
 
 def from_junit_xml(report_path, workspace=None):

@@ -230,6 +230,48 @@ def check_pytest_crash_path_is_repo_relative():
         ])
 
 
+def check_pytest_says_when_a_failure_could_not_be_anchored():
+    """A dropped anchor must leave a trace somewhere a person reads.
+
+    cin90 keeps only failures carrying both a path and a line, and `line: 0`
+    is falsy — so an unanchorable failure is not posted without a line, it is
+    removed from the review, and the "inline review failed" warning that was
+    the feature's only failing surface never fires either. Silence then reads
+    exactly like a run where every test passed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed in 0.1s")
+        outside = str(pathlib.Path(tmp).parent / "site-packages" / "json" / "decoder.py")
+        report = write(tmp, "lib.json", json.dumps({"tests": [{
+            "nodeid": "tests/test_a.py::test_two",
+            "outcome": "failed",
+            "call": {"crash": {
+                "path": outside, "lineno": 355, "message": "JSONDecodeError",
+            }},
+        }]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("the unanchored count is reported",
+               "1 failure could not be anchored" in got["output"], True)
+
+
+def check_a_non_string_crash_path_does_not_lose_the_grade():
+    """The report is student-controlled: `os.path.isabs(123)` raises, which
+    `main` turns into a 0/0 `Autograder error:` run, and cin90 records no
+    grade at all for a run that really scored 1/2."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = write(tmp, "out.txt", "1 failed, 1 passed in 0.1s")
+        report = write(tmp, "hostile.json", json.dumps({"tests": [
+            {"nodeid": "tests/test_a.py::test_one", "outcome": "passed"},
+            {"nodeid": "tests/test_a.py::test_two", "outcome": "failed",
+             "call": {"crash": {"path": 123, "lineno": 7, "message": "boom"}}},
+        ]}))
+        got = build_results(report, log, workspace=tmp)
+        expect("a hostile path still scores", (got["score"], got["max_score"]),
+               (1, 2))
+        expect("a hostile path falls back to the nodeid",
+               got["failures"][0]["path"], "tests/test_a.py")
+
+
 def check_pytest_workspace_defaults_to_the_checkout():
     """The action passes no workspace, so GITHUB_WORKSPACE is the live path."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -627,6 +669,8 @@ def main():
     for check in (
         check_pytest_json_is_unchanged,
         check_pytest_crash_path_is_repo_relative,
+        check_pytest_says_when_a_failure_could_not_be_anchored,
+        check_a_non_string_crash_path_does_not_lose_the_grade,
         check_pytest_workspace_defaults_to_the_checkout,
         check_junit_passing,
         check_junit_failing,

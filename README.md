@@ -95,7 +95,16 @@ started writing one would break the anchor silently.
 
 The nodeid fallback is weaker than a resolved path either way: pytest builds
 a nodeid against its own rootdir, which is the repository root only while the
-test command runs pytest from there.
+test command runs pytest from there. Resolution also assumes the checkout is
+`GITHUB_WORKSPACE` itself, so `actions/checkout` with a `path:` needs that
+path passed as the workspace.
+
+A failure that cannot be anchored is **named in the output** rather than
+quietly losing its line. cin90 keeps only failures carrying both a path and a
+line, so a dropped anchor takes the failure out of the inline review
+altogether, and it never reaches the API — which means the "inline review
+failed" warning does not fire either, and the run reads exactly like one
+where nothing failed.
 
 ### Anchoring a failure that has no file or line
 
